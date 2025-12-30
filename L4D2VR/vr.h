@@ -2,6 +2,7 @@
 #include "openvr.h"
 #include "vector.h"
 #include <chrono>
+#include <array>
 
 #define MAX_STR_LEN 256
 
@@ -9,7 +10,8 @@ class Game;
 class IDirect3DTexture9;
 class IDirect3DSurface9;
 class ITexture;
-
+class C_BasePlayer;
+class C_WeaponCSBase;
 
 struct TrackedDevicePoseData 
 {
@@ -183,6 +185,32 @@ public:
 	float m_HudSize = 1.1;
 	bool m_HudAlwaysVisible = false;
 
+	Vector m_AimLineStart = { 0,0,0 };
+	Vector m_AimLineEnd = { 0,0,0 };
+	Vector m_LastAimDirection = { 0,0,0 };
+	Vector m_LastUnforcedAimDirection = { 0,0,0 };
+	bool m_HasAimLine = false;
+	float m_AimLineThickness = 2.0f;
+	bool m_AimLineEnabled = true;
+	float m_AimLinePersistence = 0.02f;
+	float m_AimLineFrameDurationMultiplier = 2.0f;
+	int m_AimLineColorR = 0;
+	int m_AimLineColorG = 255;
+	int m_AimLineColorB = 0;
+	int m_AimLineColorA = 192;
+	static constexpr int THROW_ARC_SEGMENTS = 16;
+	std::array<Vector, THROW_ARC_SEGMENTS + 1> m_LastThrowArcPoints{};
+	bool m_HasThrowArc = false;
+	bool m_LastAimWasThrowable = false;
+	float m_ThrowArcBaseDistance = 500.0f;
+	float m_ThrowArcMinDistance = 20.0f;
+	float m_ThrowArcMaxDistance = 2200.0f;
+	float m_ThrowArcHeightRatio = 0.25f;
+	float m_ThrowArcPitchScale = 6.0f;
+	float m_ThrowArcLandingOffset = -90.0f;
+	// Tracks the duration of the previous frame so the aim line can persist when the framerate dips.
+	float m_LastFrameDuration = 1.0f / 90.0f;
+
 	VR() {};
 	VR(Game *game);
 	int SetActionManifest(const char *fileName);
@@ -214,4 +242,12 @@ public:
 	void GetPoseData(vr::TrackedDevicePose_t &poseRaw, TrackedDevicePoseData &poseOut);
 	void ParseConfigFile();
 	void WaitForConfigUpdate();
+	void UpdateAimingLaser(C_BasePlayer* localPlayer);
+	bool ShouldShowAimLine(C_WeaponCSBase* weapon) const;
+	bool IsThrowableWeapon(C_WeaponCSBase* weapon) const;
+	float CalculateThrowArcDistance(const Vector& pitchSource, bool* clampedToMax = nullptr) const;
+	void DrawAimLine(const Vector& start, const Vector& end);
+	void DrawThrowArc(const Vector& origin, const Vector& forward, const Vector& pitchSource);
+	void DrawThrowArcFromCache(float duration);
+	void DrawLineWithThickness(const Vector& start, const Vector& end, float duration);
 };

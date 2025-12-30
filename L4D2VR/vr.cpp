@@ -13,6 +13,7 @@
 #include <thread>
 #include <algorithm>
 #include <d3d9_vr.h>
+#include <sdk/ivdebugoverlay.h>
 
 VR::VR(Game *game) 
 {
@@ -991,6 +992,8 @@ void VR::UpdateTracking()
     // Viewmodel roll offset
     m_ViewmodelRight = VectorRotate(m_ViewmodelRight, m_ViewmodelForward, m_ViewmodelAngOffset.z);
     m_ViewmodelUp = VectorRotate(m_ViewmodelUp, m_ViewmodelForward, m_ViewmodelAngOffset.z);
+
+    UpdateAimingLaser(localPlayer);
 }
 
 Vector VR::GetViewAngle()
@@ -1056,6 +1059,82 @@ void VR::ParseConfigFile()
     m_HudDistance = std::stof(userConfig["HudDistance"]);
     m_HudSize = std::stof(userConfig["HudSize"]);
     m_HudAlwaysVisible = userConfig["HudAlwaysVisible"] == "true";
+
+    auto ltrim = [](std::string& s) {
+        s.erase(s.begin(), std::find_if(s.begin(), s.end(),
+            [](unsigned char ch) { return !std::isspace(ch); }));
+        };
+    auto rtrim = [](std::string& s) {
+        s.erase(std::find_if(s.rbegin(), s.rend(),
+            [](unsigned char ch) { return !std::isspace(ch); }).base(), s.end());
+        };
+    auto trim = [&](std::string& s) { ltrim(s); rtrim(s); };
+
+    auto getBool = [&](const char* k, bool defVal)->bool {
+        auto it = userConfig.find(k);
+        if (it == userConfig.end()) return defVal;
+        std::string v = it->second;
+        std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return std::tolower(c); });
+        if (v == "1" || v == "true" || v == "on" || v == "yes") return true;
+        if (v == "0" || v == "false" || v == "off" || v == "no")  return false;
+        return defVal;
+        };
+    auto getFloat = [&](const char* k, float defVal)->float {
+        auto it = userConfig.find(k);
+        if (it == userConfig.end() || it->second.empty()) return defVal;
+        try { return std::stof(it->second); }
+        catch (...) { return defVal; }
+        };
+    auto getInt = [&](const char* k, int defVal)->int {
+        auto it = userConfig.find(k);
+        if (it == userConfig.end() || it->second.empty()) return defVal;
+        try { return std::stoi(it->second); }
+        catch (...) { return defVal; }
+        };
+    auto getColor = [&](const char* k, int defR, int defG, int defB, int defA)->std::array<int, 4> {
+        std::array<int, 4> defaults{ defR, defG, defB, defA };
+        auto it = userConfig.find(k);
+        if (it == userConfig.end())
+            return defaults;
+
+        std::array<int, 4> color = defaults;
+        std::stringstream ss(it->second);
+        std::string token;
+        int index = 0;
+        while (std::getline(ss, token, ',') && index < 4)
+        {
+            trim(token);
+            if (!token.empty())
+            {
+                try
+                {
+                    color[index] = std::clamp(std::stoi(token), 0, 255);
+                }
+                catch (...)
+                {
+                    color[index] = defaults[index];
+                }
+            }
+            ++index;
+        }
+
+        for (int& component : color)
+        {
+            component = std::clamp(component, 0, 255);
+        }
+
+        return color;
+        };
+
+    m_AimLineEnabled = getBool("AimLineEnabled", m_AimLineEnabled);
+    m_AimLineThickness = std::max(0.0f, getFloat("AimLineThickness", m_AimLineThickness));
+    auto aimColor = getColor("AimLineColor", m_AimLineColorR, m_AimLineColorG, m_AimLineColorB, m_AimLineColorA);
+    m_AimLineColorR = aimColor[0];
+    m_AimLineColorG = aimColor[1];
+    m_AimLineColorB = aimColor[2];
+    m_AimLineColorA = aimColor[3];
+    m_AimLinePersistence = std::max(0.0f, getFloat("AimLinePersistence", m_AimLinePersistence));
+    m_AimLineFrameDurationMultiplier = std::max(0.0f, getFloat("AimLineFrameDurationMultiplier", m_AimLineFrameDurationMultiplier));
 }
 
 void VR::WaitForConfigUpdate()
@@ -1092,5 +1171,262 @@ void VR::WaitForConfigUpdate()
         FindNextChangeNotification(fileChangeHandle);
         WaitForSingleObject(fileChangeHandle, INFINITE);
         Sleep(100); // Sometimes the thread tries to read config.txt before it's finished writing
+    }
+}
+
+void VR::UpdateAimingLaser(C_BasePlayer* localPlayer)
+{
+    if (!m_Game->m_DebugOverlay)
+        return;
+
+    C_WeaponCSBase* activeWeapon = nullptr;
+    if (localPlayer)
+        activeWeapon = static_cast<C_WeaponCSBase*>(localPlayer->GetActiveWeapon());
+
+    if (!ShouldShowAimLine(activeWeapon))
+    {
+        m_LastAimDirection = Vector{ 0.0f, 0.0f, 0.0f };
+        m_HasAimLine = false;
+        m_HasThrowArc = false;
+        m_LastAimWasThrowable = false;
+        return;
+    }
+
+    bool isThrowable = IsThrowableWeapon(activeWeapon);
+    Vector direction = m_RightControllerForward;
+    if (direction.IsZero())
+    {
+        if (m_LastAimDirection.IsZero())
+        {
+            const float duration = std::max(m_AimLinePersistence, m_LastFrameDuration * m_AimLineFrameDurationMultiplier);
+
+            if (m_LastAimWasThrowable && m_HasThrowArc)
+            {
+                DrawThrowArcFromCache(duration);
+                return;
+            }
+
+            if (!m_HasAimLine)
+                return;
+
+            DrawLineWithThickness(m_AimLineStart, m_AimLineEnd, duration);
+            return;
+        }
+
+        direction = m_LastAimDirection;
+        isThrowable = m_LastAimWasThrowable;
+    }
+    else
+    {
+        m_LastAimDirection = direction;
+        m_LastAimWasThrowable = isThrowable;
+    }
+    VectorNormalize(direction);
+
+    Vector origin = m_RightControllerPosAbs + direction * 2.0f;
+
+    if (isThrowable)
+    {
+        Vector pitchSource = direction;
+        if (!m_HmdForward.IsZero())
+            pitchSource = m_HmdForward;
+
+        DrawThrowArc(origin, direction, pitchSource);
+        return;
+    }
+
+    const float maxDistance = 8192.0f;
+    Vector target = origin + direction * maxDistance;
+
+    m_AimLineStart = origin;
+    m_AimLineEnd = target;
+    m_HasAimLine = true;
+    m_HasThrowArc = false;
+
+    DrawAimLine(origin, target);
+}
+
+bool VR::ShouldShowAimLine(C_WeaponCSBase* weapon) const
+{
+    if (!m_AimLineEnabled || !weapon)
+        return false;
+
+    return IsThrowableWeapon(weapon) || weapon->HasScope();
+}
+
+bool VR::IsThrowableWeapon(C_WeaponCSBase* weapon) const
+{
+    if (!weapon)
+        return false;
+
+    switch (weapon->GetWeaponID())
+    {
+    case C_WeaponCSBase::MOLOTOV:
+    case C_WeaponCSBase::PIPE_BOMB:
+    case C_WeaponCSBase::VOMITJAR:
+        return true;
+    default:
+        return false;
+    }
+}
+
+float VR::CalculateThrowArcDistance(const Vector& pitchSource, bool* clampedToMax) const
+{
+    Vector direction = pitchSource;
+    if (direction.IsZero())
+        return m_ThrowArcMinDistance;
+
+    VectorNormalize(direction);
+
+    const float pitchInfluence = direction.z * m_ThrowArcPitchScale;
+    const float scaledDistance = m_ThrowArcBaseDistance * (1.0f + pitchInfluence);
+    const float maxDistance = std::max(m_ThrowArcMinDistance, m_ThrowArcMaxDistance);
+    const float clampedDistance = std::clamp(scaledDistance, m_ThrowArcMinDistance, maxDistance);
+
+    if (clampedToMax)
+        *clampedToMax = clampedDistance >= maxDistance;
+
+    return clampedDistance;
+}
+
+void VR::DrawAimLine(const Vector& start, const Vector& end)
+{
+    if (!m_Game->m_DebugOverlay)
+        return;
+
+    if (!m_AimLineEnabled)
+        return;
+
+    // Keep the overlay alive for at least two frames so it doesn't disappear when the framerate drops.
+    const float duration = std::max(m_AimLinePersistence, m_LastFrameDuration * m_AimLineFrameDurationMultiplier);
+
+    DrawLineWithThickness(start, end, duration);
+}
+
+void VR::DrawThrowArc(const Vector& origin, const Vector& forward, const Vector& pitchSource)
+{
+    if (!m_Game->m_DebugOverlay || !m_AimLineEnabled)
+        return;
+
+    Vector direction = forward;
+    if (direction.IsZero())
+        return;
+    VectorNormalize(direction);
+
+    Vector planarForward(direction.x, direction.y, 0.0f);
+    if (planarForward.IsZero())
+        planarForward = direction;
+    VectorNormalize(planarForward);
+
+    Vector distanceSource = pitchSource.IsZero() ? direction : pitchSource;
+    VectorNormalize(distanceSource);
+
+    bool clampedToMaxDistance = false;
+    const float distance = CalculateThrowArcDistance(distanceSource, &clampedToMaxDistance);
+    if (clampedToMaxDistance)
+    {
+        m_HasThrowArc = false;
+        m_HasAimLine = false;
+        return;
+    }
+    const float arcHeight = std::max(distance * m_ThrowArcHeightRatio, m_ThrowArcMinDistance * 0.5f);
+
+    Vector landingPoint = origin + planarForward * distance;
+    landingPoint.z += m_ThrowArcLandingOffset;
+    Vector apex = origin + planarForward * distance * 0.5f;
+    apex.z += arcHeight;
+
+    auto lerp = [](const Vector& a, const Vector& b, float t)
+        {
+            return a + (b - a) * t;
+        };
+
+    const float duration = std::max(m_AimLinePersistence, m_LastFrameDuration * m_AimLineFrameDurationMultiplier);
+    for (int i = 0; i <= THROW_ARC_SEGMENTS; ++i)
+    {
+        const float t = static_cast<float>(i) / static_cast<float>(THROW_ARC_SEGMENTS);
+        Vector ab = lerp(origin, apex, t);
+        Vector bc = lerp(apex, landingPoint, t);
+        m_LastThrowArcPoints[i] = lerp(ab, bc, t);
+    }
+
+    m_HasThrowArc = true;
+    m_HasAimLine = false;
+
+    DrawThrowArcFromCache(duration);
+}
+
+void VR::DrawThrowArcFromCache(float duration)
+{
+    if (!m_Game->m_DebugOverlay || !m_HasThrowArc)
+        return;
+
+    for (int i = 0; i < THROW_ARC_SEGMENTS; ++i)
+    {
+        DrawLineWithThickness(m_LastThrowArcPoints[i], m_LastThrowArcPoints[i + 1], duration);
+    }
+}
+
+void VR::DrawLineWithThickness(const Vector& start, const Vector& end, float duration)
+{
+    int colorR = m_AimLineColorR;
+    int colorG = m_AimLineColorG;
+    int colorB = m_AimLineColorB;
+    int colorA = m_AimLineColorA;
+
+    m_Game->m_DebugOverlay->AddLineOverlay(start, end, colorR, colorG, colorB, false, duration);
+
+    const float thickness = std::max(m_AimLineThickness, 0.0f);
+    if (thickness <= 0.0f)
+        return;
+
+    Vector forward = end - start;
+    if (forward.IsZero())
+        return;
+
+    VectorNormalize(forward);
+
+    Vector referenceUp = m_RightControllerUp;
+    if (referenceUp.IsZero())
+        referenceUp = Vector(0.0f, 0.0f, 1.0f);
+
+    Vector basis1 = CrossProduct(forward, referenceUp);
+    if (basis1.IsZero())
+        basis1 = CrossProduct(forward, Vector(0.0f, 1.0f, 0.0f));
+    if (basis1.IsZero())
+        basis1 = CrossProduct(forward, Vector(1.0f, 0.0f, 0.0f));
+    if (basis1.IsZero())
+        return;
+
+    VectorNormalize(basis1);
+    Vector basis2 = CrossProduct(forward, basis1);
+    if (basis2.IsZero())
+        return;
+    VectorNormalize(basis2);
+
+    const int segments = 16;
+    const float radius = thickness * 0.5f;
+    const float twoPi = 6.28318530718f;
+
+    for (int i = 0; i < segments; ++i)
+    {
+        const float angle0 = twoPi * static_cast<float>(i) / static_cast<float>(segments);
+        const float angle1 = twoPi * static_cast<float>(i + 1) / static_cast<float>(segments);
+
+        const float cos0 = std::cos(angle0);
+        const float sin0 = std::sin(angle0);
+        const float cos1 = std::cos(angle1);
+        const float sin1 = std::sin(angle1);
+
+        Vector offset0 = (basis1 * cos0 + basis2 * sin0) * radius;
+        Vector offset1 = (basis1 * cos1 + basis2 * sin1) * radius;
+
+        Vector start0 = start + offset0;
+        Vector start1 = start + offset1;
+        Vector end0 = end + offset0;
+        Vector end1 = end + offset1;
+
+        m_Game->m_DebugOverlay->AddTriangleOverlay(start0, start1, end1, colorR, colorG, colorB, colorA, false, duration);
+        m_Game->m_DebugOverlay->AddTriangleOverlay(start0, end1, end0, colorR, colorG, colorB, colorA, false, duration);
     }
 }
