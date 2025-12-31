@@ -211,6 +211,8 @@ public:
 	// Tracks the duration of the previous frame so the aim line can persist when the framerate dips.
 	float m_LastFrameDuration = 1.0f / 90.0f;
 
+	bool m_HideLocalPlayer = false;
+
 	VR() {};
 	VR(Game *game);
 	int SetActionManifest(const char *fileName);

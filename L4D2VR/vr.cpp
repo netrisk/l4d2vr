@@ -1135,6 +1135,8 @@ void VR::ParseConfigFile()
     m_AimLineColorA = aimColor[3];
     m_AimLinePersistence = std::max(0.0f, getFloat("AimLinePersistence", m_AimLinePersistence));
     m_AimLineFrameDurationMultiplier = std::max(0.0f, getFloat("AimLineFrameDurationMultiplier", m_AimLineFrameDurationMultiplier));
+
+    m_HideLocalPlayer = getBool("HideLocalPlayer", m_HideLocalPlayer);
 }
 
 void VR::WaitForConfigUpdate()

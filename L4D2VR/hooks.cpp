@@ -552,6 +552,24 @@ void Hooks::dDrawModelExecute(void *ecx, void *edx, void *state, const ModelRend
 		}
 	}
 
+	// Hide local player to avoid clipping if configured to do so
+	// TODO: Show player during cut-scenes
+	if (m_VR->m_HideLocalPlayer)
+	{
+		if (m_Game->m_ClientEntityList && info.entity_index > 0)
+		{
+			const int maxEntityIndex = m_Game->m_ClientEntityList->GetHighestEntityIndex();
+			if (info.entity_index <= maxEntityIndex)
+			{
+				const CBaseEntity* entity = m_Game->GetClientEntity(info.entity_index);
+				const int localPlayerIndex = m_Game->m_EngineClient->GetLocalPlayer();
+				const CBaseEntity* localPlayerEntity = m_Game->GetClientEntity(localPlayerIndex);
+				if (entity == localPlayerEntity)
+					return;
+			}
+		}
+	}
+
 	if (info.pModel && info.pModel == m_Game->m_ArmsModel && hideArms)
 	{
 		m_Game->m_ArmsMaterial->SetMaterialVarFlag(MATERIAL_VAR_NO_DRAW, true);
