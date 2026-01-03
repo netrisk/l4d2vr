@@ -37,6 +37,7 @@ public:
 	vr::IVRSystem *m_System = nullptr;
 	vr::IVRInput *m_Input = nullptr;
 	vr::IVROverlay *m_Overlay = nullptr;
+	vr::IVRCompositor* m_Compositor = nullptr;
 
 	vr::VROverlayHandle_t m_MainMenuHandle;
 	vr::VROverlayHandle_t m_HUDHandle;
@@ -133,6 +134,8 @@ public:
 	bool m_RenderedNewFrame = false;
 	bool m_RenderedHud = false;
 	bool m_CreatedVRTextures = false;
+	bool m_CompositorExplicitTiming = false;
+	bool m_CompositorNeedsHandoff = false;
 	TextureID m_CreatingTextureID = Texture_None;
 
 	bool m_PressedTurn = false;
@@ -173,6 +176,7 @@ public:
 
 	float m_RotationOffset = 0;
 	std::chrono::steady_clock::time_point m_PrevFrameTime;
+	std::chrono::steady_clock::time_point m_LastCompositorErrorLog{};
 
 	float m_TurnSpeed = 0.3;
 	bool m_SnapTurning = false;
@@ -220,9 +224,10 @@ public:
 	void Update();
 	void CreateVRTextures();
 	void SubmitVRTextures();
+	void LogCompositorError(const char* action, vr::EVRCompositorError error);
 	void RepositionOverlays();
 	void GetPoses();
-	void UpdatePosesAndActions();
+	bool UpdatePosesAndActions();
 	void GetViewParameters();
 	void ProcessMenuInput();
 	void ProcessInput();
@@ -252,4 +257,6 @@ public:
 	void DrawThrowArc(const Vector& origin, const Vector& forward, const Vector& pitchSource);
 	void DrawThrowArcFromCache(float duration);
 	void DrawLineWithThickness(const Vector& start, const Vector& end, float duration);
+	void FinishFrame();
+	void ConfigureExplicitTiming();
 };

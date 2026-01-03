@@ -33,11 +33,14 @@ VR::VR(Game *game)
 
     vr::EVRInitError peError = vr::VRInitError_None;
 
-    if (!vr::VRCompositor())
+    m_Compositor = vr::VRCompositor();
+    if (!m_Compositor)
     {
         Game::errorMsg("Compositor initialization failed.");
         return;
     }
+
+    ConfigureExplicitTiming();
 
     m_Input = vr::VRInput();
     m_System = vr::OpenVRInternal_ModuleContext().VRSystem();
@@ -96,9 +99,33 @@ VR::VR(Game *game)
     m_Overlay->SetOverlayMouseScale(m_MainMenuHandle, &mouseScaleMenu);
 
     UpdatePosesAndActions();
+    FinishFrame();
 
     m_IsInitialized = true;
     m_IsVREnabled = true;
+}
+
+void VR::FinishFrame()
+{
+    if (!m_Compositor || !m_CompositorExplicitTiming)
+        return;
+
+    if (!m_CompositorNeedsHandoff)
+        return;
+
+    m_Compositor->PostPresentHandoff();
+    m_CompositorNeedsHandoff = false;
+}
+
+void VR::ConfigureExplicitTiming()
+{
+    if (!m_Compositor)
+        return;
+
+    m_Compositor->SetExplicitTimingMode(
+        vr::VRCompositorTimingMode_Explicit_ApplicationPerformsPostPresentHandoff);
+
+    m_CompositorExplicitTiming = true;
 }
 
 int VR::SetActionManifest(const char *fileName) 
@@ -172,7 +199,13 @@ void VR::Update()
     }
 
     SubmitVRTextures();
-    UpdatePosesAndActions();
+
+    const bool posesValid = UpdatePosesAndActions();
+    if (!posesValid)
+    {
+        // TODO: Continue using the last known poses so smoothing and aim helpers stay active.
+    }
+
     UpdateTracking();
 
     if (m_Game->m_VguiSurface->IsCursorVisible())
@@ -211,6 +244,42 @@ void VR::CreateVRTextures()
 
 void VR::SubmitVRTextures()
 {
+    if (!m_Compositor)
+        return;
+
+    bool successfulSubmit = false;
+    bool timingDataSubmitted = false;
+
+    auto ensureTimingData = [&]()
+        {
+            if (!m_CompositorExplicitTiming || timingDataSubmitted)
+                return;
+
+            vr::EVRCompositorError timingError = m_Compositor->SubmitExplicitTimingData();
+            if (timingError != vr::VRCompositorError_None)
+            {
+                LogCompositorError("SubmitExplicitTimingData", timingError);
+            }
+
+            timingDataSubmitted = true;
+        };
+
+    auto submitEye = [&](vr::EVREye eye, vr::Texture_t* texture, const vr::VRTextureBounds_t* bounds)
+        {
+            ensureTimingData();
+
+            vr::EVRCompositorError submitError = m_Compositor->Submit(eye, texture, bounds, vr::Submit_Default);
+            if (submitError != vr::VRCompositorError_None)
+            {
+                LogCompositorError("Submit", submitError);
+                return false;
+            }
+
+            successfulSubmit = true;
+            return true;
+        };
+
+
     if (!m_RenderedNewFrame)
     {
         if (!m_BlankTexture)
@@ -225,12 +294,19 @@ void VR::SubmitVRTextures()
 
         if (!m_Game->m_EngineClient->IsInGame())
         {
-            vr::VRCompositor()->Submit(vr::Eye_Left, &m_VKBlankTexture.m_VRTexture, NULL, vr::Submit_Default);
-            vr::VRCompositor()->Submit(vr::Eye_Right, &m_VKBlankTexture.m_VRTexture, NULL, vr::Submit_Default);
+            submitEye(vr::Eye_Left, &m_VKBlankTexture.m_VRTexture, nullptr);
+            submitEye(vr::Eye_Right, &m_VKBlankTexture.m_VRTexture, nullptr);
+        }
+
+        if (successfulSubmit && m_CompositorExplicitTiming)
+        {
+            m_CompositorNeedsHandoff = true;
+            FinishFrame();
         }
 
         return;
     }
+
     vr::VROverlay()->HideOverlay(m_MainMenuHandle);
 
     vr::VROverlay()->SetOverlayTexture(m_HUDHandle, &m_VKHUD.m_VRTexture);
@@ -241,10 +317,31 @@ void VR::SubmitVRTextures()
         vr::VROverlay()->ShowOverlay(m_HUDHandle);
     }
 
-    vr::VRCompositor()->Submit(vr::Eye_Left, &m_VKLeftEye.m_VRTexture, &(m_TextureBounds)[0], vr::Submit_Default);
-    vr::VRCompositor()->Submit(vr::Eye_Right, &m_VKRightEye.m_VRTexture, &(m_TextureBounds)[1], vr::Submit_Default);
+    submitEye(vr::Eye_Left, &m_VKLeftEye.m_VRTexture, &(m_TextureBounds)[0]);
+    submitEye(vr::Eye_Right, &m_VKRightEye.m_VRTexture, &(m_TextureBounds)[1]);
+
+    if (successfulSubmit && m_CompositorExplicitTiming)
+    {
+        m_CompositorNeedsHandoff = true;
+        FinishFrame();
+    }
 
     m_RenderedNewFrame = false;
+}
+
+void VR::LogCompositorError(const char* action, vr::EVRCompositorError error)
+{
+    if (error == vr::VRCompositorError_None || !action)
+        return;
+
+    constexpr auto kLogCooldown = std::chrono::seconds(5);
+    const auto now = std::chrono::steady_clock::now();
+
+    if (now - m_LastCompositorErrorLog < kLogCooldown)
+        return;
+
+    Game::logMsg("[VR] %s failed with VRCompositorError %d", action, static_cast<int>(error));
+    m_LastCompositorErrorLog = now;
 }
 
 void VR::GetPoseData(vr::TrackedDevicePose_t &poseRaw, TrackedDevicePoseData &poseOut)
@@ -367,10 +464,19 @@ void VR::GetPoses()
     GetPoseData(rightControllerPose, m_RightControllerPose);
 }
 
-void VR::UpdatePosesAndActions() 
+bool VR::UpdatePosesAndActions()
 {
-    vr::VRCompositor()->WaitGetPoses(m_Poses, vr::k_unMaxTrackedDeviceCount, NULL, 0);
+    if (!m_Compositor)
+        return false;
+
+    vr::EVRCompositorError result = m_Compositor->WaitGetPoses(m_Poses, vr::k_unMaxTrackedDeviceCount, NULL, 0);
+    bool posesValid = (result == vr::VRCompositorError_None);
+
+    if (!posesValid && m_CompositorExplicitTiming)
+        m_CompositorNeedsHandoff = false;
+
     m_Input->UpdateActionState(&m_ActiveActionSet, sizeof(vr::VRActiveActionSet_t), 1);
+    return posesValid;
 }
 
 void VR::GetViewParameters() 
